@@ -1,7 +1,6 @@
 # sltop: A top-like queue viewer for Slurm
 
-A slightly more aesthetically pleasing version of `squeue`, with node usage
-bars and a scrollable, refreshing job list.
+A htop-inspired version of `squeue` for small slurm clusters, with node usage bars and a scrollable, refreshing job list.
 
 ## Installation
 
