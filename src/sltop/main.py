@@ -58,6 +58,10 @@ _INFO_ROWS = _INFO_LINES + 1
 # of a column but merges with its attributes.
 _CURSOR_STYLE = "not bold black on white"
 
+# Style of the secondary half of a combined column, e.g. the "/0" of "batch/0".
+# The colour is reset, so that it is the same gray in every column.
+_SECONDARY_STYLE = "dim default"
+
 # Controls listed by the bar at the bottom of the interactive view.
 _CONTROLS = (
     ("i", "info"),
@@ -139,7 +143,7 @@ def render_job_info(job: Job | None) -> Text:
     lines = []
     if job is not None:
         name = job.name
-        job_id = str(job.job_id)
+        job_id = job.display_id
 
         # A job which is waiting reports how long it has been waiting, and what
         # it asked for rather than what it holds.
@@ -259,7 +263,7 @@ def render(
     # 3. Bottom Section: Job List
     table = Table(box=None, padding=(0, 1), show_lines=False, expand=True)
 
-    table.add_column("ID", justify="right", style="cyan", no_wrap=True)
+    table.add_column("ID/ARR", style="cyan", no_wrap=True)
     table.add_column("PART/NICE", no_wrap=True)
     table.add_column("USER", style="yellow", no_wrap=True)
     table.add_column("NAME", no_wrap=True, ratio=2)
@@ -287,21 +291,31 @@ def render(
         elif job.job_state == "PENDING":
             st_code = "PD"
 
-        job_id_display = str(job.job_id)
         job_name_display = job.name
+
+        # The secondary halves are dimmed, except on the cursor row.
+        secondary = "" if selected else _SECONDARY_STYLE
+
+        # Array tasks show the array's ID, with the task(s) after it.
+        if job.array_task_id:
+            job_id = Text(str(job.array_job_id))
+            job_id.append(f"/{job.array_task_id}", style=secondary)
+        else:
+            job_id = Text(str(job.job_id))
 
         if job.nice > 0:
             nice_style = "bright_green"
         elif job.nice < 0:
             nice_style = "bright_red"
         else:
-            nice_style = "dim"
+            nice_style = _SECONDARY_STYLE
 
-        part_nice = Text(f"{job.partition}/")
+        part_nice = Text(job.partition)
+        part_nice.append("/", style=secondary)
         part_nice.append(str(job.nice), style="" if selected else nice_style)
 
         table.add_row(
-            escape(job_id_display),
+            job_id,
             part_nice,
             job.user_name,
             escape(job_name_display),

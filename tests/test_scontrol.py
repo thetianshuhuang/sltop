@@ -103,6 +103,20 @@ def test_show_contains_filter(monkeypatch):
     assert [r["JobId"] for r in records] == ["1"]
 
 
+def test_show_name(monkeypatch):
+    """`name` shows a single entity."""
+    commands = []
+
+    def check_output(command, **kwargs):
+        commands.append(command)
+        return "JobId=7\n"
+
+    monkeypatch.setattr(scontrol.subprocess, "check_output", check_output)
+
+    assert scontrol.show("job", name="7") == [{"JobId": "7"}]
+    assert commands == [["scontrol", "--oneliner", "show", "job", "7"]]
+
+
 def test_show_unavailable(monkeypatch):
     """A missing or failing scontrol yields no records rather than raising."""
 

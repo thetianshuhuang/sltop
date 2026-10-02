@@ -36,7 +36,9 @@ def parse_record(line: str) -> dict[str, str]:
     return record
 
 
-def show(entity: str, contains: str | None = None) -> list[dict[str, str]]:
+def show(
+    entity: str, contains: str | None = None, name: str | None = None
+) -> list[dict[str, str]]:
     """Runs `scontrol show <entity>`, returning one record per entity.
 
     Args:
@@ -45,13 +47,18 @@ def show(entity: str, contains: str | None = None) -> list[dict[str, str]]:
             dropped without being parsed. Parsing dominates the cost of this
             function on a large cluster, so this is worth doing even though it
             is only an approximation of the real filter.
+        name: If set, only show this entity, e.g. a job ID.
 
     Returns:
         A list of parsed records; empty if scontrol is unavailable or failed.
     """
+    command = ["scontrol", "--oneliner", "show", entity]
+    if name is not None:
+        command.append(name)
+
     try:
         output = subprocess.check_output(
-            ["scontrol", "--oneliner", "show", entity],
+            command,
             text=True,
             stderr=subprocess.DEVNULL,
         )

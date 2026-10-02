@@ -23,6 +23,8 @@ _JOB_DEFAULTS = {
     "submit_time": 0,
     "req_nodes": "",
     "command": "/bin/true",
+    "array_job_id": 0,
+    "array_task_id": "",
 }
 
 _NODE_DEFAULTS = {

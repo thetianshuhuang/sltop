@@ -48,6 +48,23 @@ def test_parse_job_id(job_id, expected):
     assert Job._parse_job_id(job_id) == expected
 
 
+@pytest.mark.parametrize(
+    "array_job_id,array_task_id,expected",
+    [
+        (0, "", "25551"),
+        (25190, "1", "25190_1"),
+        (25524, "0-12", "25524_[0-12]"),
+        (25578, "0-30%4", "25578_[0-30%4]"),
+    ],
+)
+def test_display_id(make_job, array_job_id, array_task_id, expected):
+    """Array tasks are shown as squeue shows them."""
+    job = make_job(
+        job_id=25551, array_job_id=array_job_id, array_task_id=array_task_id
+    )
+    assert job.display_id == expected
+
+
 def test_gres_strips_prefix(make_job):
     """Both spellings of the GRES prefix are removed."""
     assert make_job(tres_per_node="gres/gpu:4").gres == "gpu:4"
@@ -130,6 +147,74 @@ def test_job_from_record_pending():
     )
     assert job.tres_alloc == ""
     assert job.get_resources_requested() == {"cpu": 8, "mem": 16384, "gpu": 1}
+
+
+@pytest.mark.parametrize(
+    "record,expected",
+    [
+        # Memory and CPUs from the partition's per-GPU defaults.
+        (
+            {
+                "ReqTRES": "cpu=1,mem=1500000M,node=1,gres/gpu=1",
+                "MinMemoryNode": "0",
+                "CpusPerTres": "gpu:16",
+                "MemPerTres": "gpu:96000",
+            },
+            {"cpu": 16, "mem": 96000, "node": 1, "gpu": 1},
+        ),
+        # Memory per CPU, with CPUs per GPU.
+        (
+            {
+                "ReqTRES": "cpu=1,mem=5G,node=1,gres/gpu=4",
+                "MinMemoryCPU": "5G",
+                "CpusPerTres": "gres/gpu:30",
+            },
+            {"cpu": 120, "mem": 120 * 5120, "node": 1, "gpu": 4},
+        ),
+        # Memory per node, with CPUs per GPU.
+        (
+            {
+                "ReqTRES": "cpu=1,mem=10G,node=1,gres/gpu=2",
+                "MinMemoryNode": "10G",
+                "CpusPerTres": "gres/gpu:4",
+                "MemPerTres": "gpu:96000",
+            },
+            {"cpu": 8, "mem": 10240, "node": 1, "gpu": 2},
+        ),
+        # Memory per CPU, with the CPUs asked for directly.
+        (
+            {
+                "ReqTRES": "cpu=4,mem=8G,node=1,gres/gpu=2",
+                "MinMemoryCPU": "2G",
+            },
+            {"cpu": 4, "mem": 8192, "node": 1, "gpu": 2},
+        ),
+        # Memory per GPU asked for directly, which Slurm has applied already.
+        (
+            {
+                "ReqTRES": "cpu=1,mem=20G,node=1,gres/gpu=1",
+                "MinMemoryNode": "0",
+                "CpusPerTres": "gres/gpu:8",
+                "MemPerTres": "gres/gpu:20480",
+            },
+            {"cpu": 8, "mem": 20480, "node": 1, "gpu": 1},
+        ),
+        # From squeue, where memory is assumed to be per node.
+        (
+            {
+                "AllocTRES": "cpu=1,mem=1500000M,node=1,gres/gpu=1",
+                "MinMemory": "0",
+                "CpusPerTres": "gpu:16",
+                "MemPerTres": "gpu:96000",
+            },
+            {"cpu": 16, "mem": 96000, "node": 1, "gpu": 1},
+        ),
+    ],
+)
+def test_job_from_record_pending_defaults(record, expected):
+    """Defaults Slurm leaves out of a pending job's request are filled in."""
+    job = Job.from_record({"JobId": "1", "JobState": "PENDING", **record})
+    assert job.get_resources_requested() == expected
 
 
 def test_job_from_record_pending_reports_request_as_alloc():
@@ -235,6 +320,79 @@ def test_get_jobs(monkeypatch):
         (1, "train", "alice"),
         (2, "eval", "bob"),
     ]
+
+
+def test_get_jobs_arrays(monkeypatch):
+    """Array fields are read from squeue, which prints N/A for other jobs."""
+    lines = [
+        _squeue_line(JobId=job_id, ArrayJobId=array_id, ArrayTaskId=task_id)
+        for job_id, array_id, task_id in [
+            ("5", "5", "N/A"),
+            ("9", "3", "1"),
+            ("3", "3", "2-8%2"),
+        ]
+    ]
+    monkeypatch.setattr(
+        jobs_module.subprocess, "check_output", lambda *a, **k: "\n".join(lines)
+    )
+
+    assert sorted(j.display_id for j in get_jobs()) == ["3_1", "3_[2-8%2]", "5"]
+
+
+def test_sort_keeps_arrays_together(make_job):
+    """Tasks of an array sort next to each other, by their array's ID."""
+    jobs = [
+        make_job(job_id=4, job_state="PENDING", state_reason="Priority"),
+        make_job(
+            job_id=7,
+            array_job_id=3,
+            array_task_id="1",
+            job_state="PENDING",
+            state_reason="Priority",
+        ),
+        make_job(
+            job_id=3,
+            array_job_id=3,
+            array_task_id="2-8",
+            job_state="PENDING",
+            state_reason="Priority",
+        ),
+    ]
+    assert [j.job_id for j in _sort_jobs(jobs)] == [3, 7, 4]
+
+
+def test_get_jobs_looks_up_memory_per_cpu(monkeypatch):
+    """Ambiguous memory from squeue, and only that, is looked up in scontrol."""
+    fields = {"JobState": "PENDING", "CpusPerTres": "gres/gpu:30"}
+    lines = [
+        _squeue_line(
+            JobId="1",
+            AllocTRES="cpu=1,mem=5G,gres/gpu=4",
+            MinMemory="5G",
+            **fields,
+        ),
+        _squeue_line(
+            JobId="2", AllocTRES="cpu=1,gres/gpu=1", MinMemory="0", **fields
+        ),
+        _squeue_line(JobId="3", JobState="RUNNING", MinMemory="5G"),
+    ]
+    monkeypatch.setattr(
+        jobs_module.subprocess, "check_output", lambda *a, **k: "\n".join(lines)
+    )
+    monkeypatch.setattr(jobs_module, "_memory_cache", {})
+
+    lookups = []
+
+    def show(entity, name=None, **kwargs):
+        lookups.append(name)
+        return [{"JobId": name, "MinMemoryCPU": "5G"}]
+
+    monkeypatch.setattr(jobs_module.scontrol, "show", show)
+
+    job = next(j for j in get_jobs() if j.job_id == 1)
+    assert job.get_resources_requested()["mem"] == 120 * 5120
+    get_jobs()
+    assert lookups == ["1"]
 
 
 def test_get_jobs_filters(monkeypatch):

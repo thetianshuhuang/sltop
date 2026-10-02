@@ -16,6 +16,8 @@ _SQUEUE_SEPARATOR = "\x1f"
 # squeue pads and truncates each field to its width, so these are generous.
 _SQUEUE_FIELDS = (
     ("JobId", "jobid", 24),
+    ("ArrayJobId", "arrayjobid", 24),
+    ("ArrayTaskId", "arraytaskid", 64),
     ("Partition", "partition", 24),
     ("UserId", "username", 24),
     ("JobState", "state", 16),
@@ -29,6 +31,11 @@ _SQUEUE_FIELDS = (
     ("Reason", "reason", 32),
     ("NumCPUs", "numcpus", 10),
     ("AllocTRES", "tres-alloc", 128),
+    ("CpusPerTres", "cpus-per-tres", 48),
+    ("MemPerTres", "mem-per-tres", 48),
+    # squeue does not say whether this is per node or per CPU, unlike scontrol,
+    # which reports either MinMemoryNode or MinMemoryCPU.
+    ("MinMemory", "minmemory", 16),
     ("Command", "command", 256),
     ("JobName", "name", 256),
 )
@@ -46,6 +53,12 @@ _FINISHED_STATES = {
     "PREEMPTED",
     "TIMEOUT",
 }
+
+# Whether the memory of a pending job is per node or per CPU, which squeue does
+# not report, as {job ID: scontrol memory fields}. A job's request is fixed once
+# it is submitted, so each job only needs to be looked up once.
+_MEMORY_FIELDS = ("MinMemoryNode", "MinMemoryCPU")
+_memory_cache: dict[str, dict[str, str]] = {}
 
 
 @dataclasses.dataclass
@@ -65,10 +78,28 @@ class Job:
     state_reason: str
     cpus: int
     tres_alloc: str  # Total allocated TRES, e.g. "cpu=64,mem=375G,gres/gpu=4"
-    tres_req: str  # TRES the job asked for, in the same format
+    # TRES the job asked for, in the same format, with defaults filled in
+    tres_req: str
     submit_time: int
     req_nodes: str  # Nodes the job explicitly asked for, if any
     command: str
+    array_job_id: int  # ID of the array the job belongs to, if any
+    # Task index, or for tasks still pending together, their indices along
+    # with any throttle, e.g. "0-30%4"; empty if the job is not an array.
+    array_task_id: str
+
+    @property
+    def display_id(self) -> str:
+        """Returns the job ID as squeue shows it, e.g. "25190_1".
+
+        Array tasks which are still pending together are shown as one job,
+        with their indices in brackets, e.g. "25578_[0-30%4]".
+        """
+        if not self.array_task_id:
+            return str(self.job_id)
+        if self.array_task_id.isdigit():
+            return f"{self.array_job_id}_{self.array_task_id}"
+        return f"{self.array_job_id}_[{self.array_task_id}]"
 
     @property
     def partitions(self) -> list[str]:
@@ -171,6 +202,62 @@ class Job:
         return res
 
     @staticmethod
+    def _parse_per_gres(value: str) -> dict:
+        """Parses a per-GRES amount into a dictionary {gres: amount}.
+
+        Examples:
+            "gres/gpu:30" -> {'gpu': '30'}
+            "gpu:96000" -> {'gpu': '96000'}
+        """
+        res = {}
+        for part in value.split(","):
+            fields = part.removeprefix("gres/").removeprefix("gres:").split(":")
+            if len(fields) >= 2:
+                res[fields[0]] = fields[-1]
+        return res
+
+    @staticmethod
+    def _resolve_request(tres_req: str, data: dict) -> str:
+        """Fills the defaults Slurm leaves out of a pending job's request.
+
+        Slurm reports the request as submitted: CPUs per GPU are never applied
+        to it, memory per CPU only counts the CPUs asked for directly, and a
+        job which relies on its partition's memory per GPU asks for whole nodes
+        of memory instead.
+
+        Args:
+            tres_req: The request, e.g. "cpu=1,mem=1500000M,gres/gpu=1".
+            data: The job's record, for the fields which qualify the request.
+
+        Returns:
+            The request with these filled in, in the same format.
+        """
+        req = Job._parse_tres(tres_req)
+        gpus = req.get("gpu", 0)
+        if not gpus:
+            # Without GPUs, the request already counts every CPU.
+            return tres_req
+
+        cpus_per_gpu = Job._parse_per_gres(scontrol.get(data, "CpusPerTres"))
+        mem_per_gpu = Job._parse_per_gres(scontrol.get(data, "MemPerTres"))
+        if "gpu" in cpus_per_gpu:
+            req["cpu"] = max(
+                req.get("cpu", 0), scontrol.get_int(cpus_per_gpu, "gpu") * gpus
+            )
+
+        # MinMemory comes from squeue, which cannot say which of these it is.
+        mem_per_cpu = scontrol.get(data, "MinMemoryCPU")
+        mem_per_node = scontrol.get(data, "MinMemoryNode") or scontrol.get(
+            data, "MinMemory"
+        )
+        if mem_per_cpu:
+            req["mem"] = Job._parse_memory(mem_per_cpu) * req.get("cpu", 0)
+        elif mem_per_node == "0" and "gpu" in mem_per_gpu:
+            req["mem"] = Job._parse_memory(mem_per_gpu["gpu"]) * gpus
+
+        return ",".join(f"{key}={value}" for key, value in req.items())
+
+    @staticmethod
     def _parse_job_id(job_id: str) -> int:
         """Parses a job ID, e.g. "12345", or "12345_7" for job array tasks."""
         try:
@@ -199,7 +286,7 @@ class Job:
         # pending job asked for in place of its (empty) allocation.
         tres_req = scontrol.get(data, "ReqTRES")
         if state == "PENDING":
-            tres_req = tres_req or tres_alloc
+            tres_req = Job._resolve_request(tres_req or tres_alloc, data)
             tres_alloc = ""
         else:
             # squeue cannot report the request once a job has started, so it is
@@ -225,6 +312,8 @@ class Job:
             submit_time=scontrol.get_time(data, "SubmitTime"),
             req_nodes=scontrol.get(data, "ReqNodeList"),
             command=scontrol.get(data, "Command"),
+            array_job_id=scontrol.get_int(data, "ArrayJobId"),
+            array_task_id=scontrol.get(data, "ArrayTaskId"),
         )
 
 
@@ -269,6 +358,39 @@ def _squeue_records(partition: str | None) -> list[dict[str, str]] | None:
     return records
 
 
+def _add_memory_fields(records: list[dict[str, str]]) -> None:
+    """Adds whether memory is per node or per CPU to squeue records.
+
+    This only matters for pending jobs whose CPUs are set per GPU, and which
+    ask for a particular amount of memory, so only those are looked up.
+
+    Args:
+        records: Records from squeue, which are updated in place.
+    """
+    ambiguous = {
+        r["JobId"]: r
+        for r in records
+        if r.get("JobState") == "PENDING"
+        and scontrol.get(r, "CpusPerTres")
+        and scontrol.get(r, "MinMemory", "0") != "0"
+    }
+
+    for job_id in ambiguous.keys() - _memory_cache.keys():
+        fields = {}
+        for record in scontrol.show("job", name=job_id):
+            # Showing an array shows all of its tasks.
+            if record.get("JobId") == job_id:
+                fields = {k: record[k] for k in _MEMORY_FIELDS if k in record}
+        _memory_cache[job_id] = fields
+
+    # Jobs which are no longer pending will not be looked up again.
+    for job_id in _memory_cache.keys() - ambiguous.keys():
+        del _memory_cache[job_id]
+
+    for job_id, record in ambiguous.items():
+        record.update(_memory_cache[job_id])
+
+
 def _sort_jobs(jobs: list[Job]) -> list[Job]:
     """Sorts jobs by state, then by reason and nice value.
 
@@ -280,7 +402,8 @@ def _sort_jobs(jobs: list[Job]) -> list[Job]:
     4. Pending jobs with reason Dependency, sorted by nice.
     5. Failed/Cancelled/Other.
     """
-    jobs.sort(key=lambda j: j.job_id)
+    # Tasks of the same array are kept together.
+    jobs.sort(key=lambda j: (j.array_job_id or j.job_id, j.job_id))
 
     job_categories = {}
     for j in jobs:
@@ -331,6 +454,8 @@ def get_jobs(
     records = _squeue_records(partition)
     if records is None:
         records = scontrol.show("job", contains=partition)
+    else:
+        _add_memory_fields(records)
 
     jobs = [Job.from_record(r) for r in records]
     jobs = [j for j in jobs if j.job_state not in _FINISHED_STATES]
