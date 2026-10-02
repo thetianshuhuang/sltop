@@ -300,6 +300,7 @@ def test_get_jobs(monkeypatch):
             UserId="alice",
             JobState="RUNNING",
             NodeList="b0",
+            TimeLimit="1-00:00:00",
             JobName="train",
         ),
         _squeue_line(
@@ -308,6 +309,7 @@ def test_get_jobs(monkeypatch):
             UserId="bob",
             JobState="PENDING",
             Reason="Resources",
+            TimeLimit="UNLIMITED",
             JobName="eval",
         ),
     ]
@@ -316,9 +318,9 @@ def test_get_jobs(monkeypatch):
     )
 
     jobs = get_jobs()
-    assert [(j.job_id, j.name, j.user_name) for j in jobs] == [
-        (1, "train", "alice"),
-        (2, "eval", "bob"),
+    assert [(j.job_id, j.name, j.user_name, j.time_limit) for j in jobs] == [
+        (1, "train", "alice", "1-00:00:00"),
+        (2, "eval", "bob", "UNLIMITED"),
     ]
 
 

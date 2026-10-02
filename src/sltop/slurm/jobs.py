@@ -23,6 +23,7 @@ _SQUEUE_FIELDS = (
     ("JobState", "state", 16),
     ("StartTime", "starttime", 24),
     ("SubmitTime", "submittime", 24),
+    ("TimeLimit", "timelimit", 16),
     ("Nice", "nice", 12),
     ("NumNodes", "numnodes", 10),
     ("NodeList", "nodelist", 64),
@@ -87,6 +88,8 @@ class Job:
     # Task index, or for tasks still pending together, their indices along
     # with any throttle, e.g. "0-30%4"; empty if the job is not an array.
     array_task_id: str
+    # Wall time limit as Slurm prints it, e.g. "1-00:00:00" or "UNLIMITED"
+    time_limit: str
 
     @property
     def display_id(self) -> str:
@@ -314,6 +317,7 @@ class Job:
             command=scontrol.get(data, "Command"),
             array_job_id=scontrol.get_int(data, "ArrayJobId"),
             array_task_id=scontrol.get(data, "ArrayTaskId"),
+            time_limit=scontrol.get(data, "TimeLimit", "-"),
         )
 
 

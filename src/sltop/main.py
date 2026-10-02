@@ -175,7 +175,7 @@ def render_job_info(job: Job | None) -> Text:
             (
                 "state",
                 f"{job.job_state} ({job.state_reason})"
-                f"   nice {job.nice}   {waited}",
+                f"   nice {job.nice}   {waited}   limit {job.time_limit}",
             ),
             (label, held),
         ]
@@ -269,6 +269,7 @@ def render(
     table.add_column("NAME", no_wrap=True, ratio=2)
     table.add_column("ST", style="bold", no_wrap=True)
     table.add_column("TIME", justify="right", no_wrap=True)
+    table.add_column("LIMIT", justify="right", no_wrap=True)
     table.add_column("RESOURCES", no_wrap=True, ratio=1)
 
     for index, job in enumerate(visible, start=offset):
@@ -321,6 +322,7 @@ def render(
             escape(job_name_display),
             Text(st_code, style="" if selected else st_style),
             job.time_used,
+            job.time_limit,
             escape(format_resources(job)),
             style=_CURSOR_STYLE if selected else None,
         )

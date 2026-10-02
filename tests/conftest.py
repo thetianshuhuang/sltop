@@ -25,6 +25,7 @@ _JOB_DEFAULTS = {
     "command": "/bin/true",
     "array_job_id": 0,
     "array_task_id": "",
+    "time_limit": "1:00:00",
 }
 
 _NODE_DEFAULTS = {
